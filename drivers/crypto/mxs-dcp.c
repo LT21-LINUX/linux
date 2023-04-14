@@ -17,8 +17,7 @@
 #include <linux/clk.h>
 
 #include <crypto/aes.h>
-#include <crypto/sha1.h>
-#include <crypto/sha2.h>
+#include <crypto/sha.h>
 #include <crypto/internal/hash.h>
 #include <crypto/internal/skcipher.h>
 #include <crypto/scatterwalk.h>
@@ -413,11 +412,11 @@ static int dcp_chan_thread_aes(void *data)
 		set_current_state(TASK_RUNNING);
 
 		if (backlog)
-			crypto_request_complete(backlog, -EINPROGRESS);
+			backlog->complete(backlog, -EINPROGRESS);
 
 		if (arq) {
 			ret = mxs_dcp_aes_block_crypt(arq);
-			crypto_request_complete(arq, ret);
+			arq->complete(arq, ret);
 		}
 	}
 
@@ -709,11 +708,11 @@ static int dcp_chan_thread_sha(void *data)
 		set_current_state(TASK_RUNNING);
 
 		if (backlog)
-			crypto_request_complete(backlog, -EINPROGRESS);
+			backlog->complete(backlog, -EINPROGRESS);
 
 		if (arq) {
 			ret = dcp_sha_req_to_buf(arq);
-			crypto_request_complete(arq, ret);
+			arq->complete(arq, ret);
 		}
 	}
 

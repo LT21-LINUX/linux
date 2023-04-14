@@ -780,7 +780,7 @@ static ssize_t mtk_btcvsd_snd_write(struct mtk_btcvsd_snd *bt,
 				    char __user *buf,
 				    size_t count)
 {
-	int written_size = count, avail, cur_write_idx, write_size, cont;
+	int written_size = count, avail = 0, cur_write_idx, write_size, cont;
 	unsigned int cur_buf_ofs = 0;
 	unsigned long flags;
 	unsigned int packet_size = bt->tx->packet_size;
@@ -808,7 +808,7 @@ static ssize_t mtk_btcvsd_snd_write(struct mtk_btcvsd_snd *bt,
 		spin_unlock_irqrestore(&bt->tx_lock, flags);
 
 		if (!avail) {
-			int ret = wait_for_bt_irq(bt, bt->tx);
+			int ret = wait_for_bt_irq(bt, bt->rx);
 
 			if (ret)
 				return written_size;
@@ -1038,9 +1038,11 @@ static int mtk_pcm_btcvsd_copy(struct snd_soc_component *component,
 	struct mtk_btcvsd_snd *bt = snd_soc_component_get_drvdata(component);
 
 	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK)
-		return mtk_btcvsd_snd_write(bt, buf, count);
+		mtk_btcvsd_snd_write(bt, buf, count);
 	else
-		return mtk_btcvsd_snd_read(bt, buf, count);
+		mtk_btcvsd_snd_read(bt, buf, count);
+
+	return 0;
 }
 
 /* kcontrol */

@@ -19,10 +19,10 @@
 #include "util/data.h"
 #include "util/stat.h"
 #include "util/debug.h"
+#include "util/event.h"
 #include "util/symbol.h"
 #include "util/session.h"
 #include "util/build-id.h"
-#include "util/sample.h"
 #include "util/synthetic-events.h"
 
 #define MMAP_DEV_MAJOR  8
@@ -380,7 +380,7 @@ static int inject_build_id(struct bench_data *data, u64 *max_rss)
 		}
 	}
 
-	/* this makes the child to finish */
+	/* tihs makes the child to finish */
 	close(data->input_pipe[1]);
 
 	wait4(data->pid, &status, 0, &rusage);

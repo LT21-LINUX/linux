@@ -47,7 +47,6 @@
 #include <linux/sched.h>
 #include <linux/audit.h>
 #include <linux/vmalloc.h>
-#include <linux/lsm_hooks.h>
 #include <net/netlabel.h>
 
 #include "flask.h"
@@ -66,7 +65,12 @@
 #include "ebitmap.h"
 #include "audit.h"
 #include "policycap_names.h"
-#include "ima.h"
+
+struct convert_context_args {
+	struct selinux_state *state;
+	struct policydb *oldp;
+	struct policydb *newp;
+};
 
 struct selinux_policy_convert_data {
 	struct convert_context_args args;
@@ -93,7 +97,7 @@ static void context_struct_compute_av(struct policydb *policydb,
 				      struct extended_perms *xperms);
 
 static int selinux_set_mapping(struct policydb *pol,
-			       const struct security_class_mapping *map,
+			       struct security_class_mapping *map,
 			       struct selinux_map *out_map)
 {
 	u16 i, j;
@@ -115,7 +119,7 @@ static int selinux_set_mapping(struct policydb *pol,
 	/* Store the raw class and permission values */
 	j = 0;
 	while (map[j].name) {
-		const struct security_class_mapping *p_in = map + (j++);
+		struct security_class_mapping *p_in = map + (j++);
 		struct selinux_mapping *p_out = out_map->mapping + j;
 
 		/* An empty class string skips ahead */
@@ -352,27 +356,27 @@ static int constraint_expr_eval(struct policydb *policydb,
 				l2 = &(tcontext->range.level[1]);
 				goto mls_ops;
 mls_ops:
-				switch (e->op) {
-				case CEXPR_EQ:
-					s[++sp] = mls_level_eq(l1, l2);
-					continue;
-				case CEXPR_NEQ:
-					s[++sp] = !mls_level_eq(l1, l2);
-					continue;
-				case CEXPR_DOM:
-					s[++sp] = mls_level_dom(l1, l2);
-					continue;
-				case CEXPR_DOMBY:
-					s[++sp] = mls_level_dom(l2, l1);
-					continue;
-				case CEXPR_INCOMP:
-					s[++sp] = mls_level_incomp(l2, l1);
-					continue;
-				default:
-					BUG();
-					return 0;
-				}
-				break;
+			switch (e->op) {
+			case CEXPR_EQ:
+				s[++sp] = mls_level_eq(l1, l2);
+				continue;
+			case CEXPR_NEQ:
+				s[++sp] = !mls_level_eq(l1, l2);
+				continue;
+			case CEXPR_DOM:
+				s[++sp] = mls_level_dom(l1, l2);
+				continue;
+			case CEXPR_DOMBY:
+				s[++sp] = mls_level_dom(l2, l1);
+				continue;
+			case CEXPR_INCOMP:
+				s[++sp] = mls_level_incomp(l2, l1);
+				continue;
+			default:
+				BUG();
+				return 0;
+			}
+			break;
 			default:
 				BUG();
 				return 0;
@@ -523,6 +527,8 @@ out:
 	/* release scontext/tcontext */
 	kfree(tcontext_name);
 	kfree(scontext_name);
+
+	return;
 }
 
 /*
@@ -601,7 +607,9 @@ void services_compute_xperms_drivers(
 					node->datum.u.xperms->driver);
 	}
 
-	xperms->len = 1;
+	/* If no ioctl commands are allowed, ignore auditallow and auditdeny */
+	if (node->key.specified & AVTAB_XPERMS_ALLOWED)
+		xperms->len = 1;
 }
 
 /*
@@ -851,7 +859,6 @@ int security_validate_transition(struct selinux_state *state,
  * It returns 0, if @newsid is bounded by @oldsid.
  * Otherwise, it returns error code.
  *
- * @state: SELinux state
  * @oldsid : current security identifier
  * @newsid : destinated security identifier
  */
@@ -1091,10 +1098,9 @@ allow:
 
 /**
  * security_compute_av - Compute access vector decisions.
- * @state: SELinux state
  * @ssid: source security identifier
  * @tsid: target security identifier
- * @orig_tclass: target security class
+ * @tclass: target security class
  * @avd: access vector decisions
  * @xperms: extended permissions
  *
@@ -1380,7 +1386,6 @@ out_unlock:
 
 /**
  * security_sid_to_context - Obtain a context for a given SID.
- * @state: SELinux state
  * @sid: security identifier, SID
  * @scontext: security context
  * @scontext_len: length in bytes
@@ -1406,7 +1411,6 @@ int security_sid_to_context_force(struct selinux_state *state, u32 sid,
 /**
  * security_sid_to_context_inval - Obtain a context for a given SID if it
  *                                 is invalid.
- * @state: SELinux state
  * @sid: security identifier, SID
  * @scontext: security context
  * @scontext_len: length in bytes
@@ -1444,7 +1448,7 @@ static int string_to_context_struct(struct policydb *pol,
 	/* Parse the security context. */
 
 	rc = -EINVAL;
-	scontextp = scontext;
+	scontextp = (char *) scontext;
 
 	/* Extract the user. */
 	p = scontextp;
@@ -1583,7 +1587,6 @@ out:
 
 /**
  * security_context_to_sid - Obtain a SID for a given security context.
- * @state: SELinux state
  * @scontext: security context
  * @scontext_len: length in bytes
  * @sid: security identifier, SID
@@ -1613,12 +1616,10 @@ int security_context_str_to_sid(struct selinux_state *state,
  * security_context_to_sid_default - Obtain a SID for a given security context,
  * falling back to specified default if needed.
  *
- * @state: SELinux state
  * @scontext: security context
  * @scontext_len: length in bytes
  * @sid: security identifier, SID
  * @def_sid: default SID to assign on error
- * @gfp_flags: the allocator get-free-page (GFP) flags
  *
  * Obtains a SID associated with the security context that
  * has the string representation specified by @scontext.
@@ -1666,8 +1667,6 @@ static int compute_sid_handle_invalid_context(
 	if (context_struct_to_string(policydb, newcontext, &n, &nlen))
 		goto out;
 	ab = audit_log_start(audit_context(), GFP_ATOMIC, AUDIT_SELINUX_ERR);
-	if (!ab)
-		goto out;
 	audit_log_format(ab,
 			 "op=security_compute_sid invalid_context=");
 	/* no need to record the NUL with untrusted strings */
@@ -1908,11 +1907,9 @@ out:
 
 /**
  * security_transition_sid - Compute the SID for a new subject/object.
- * @state: SELinux state
  * @ssid: source security identifier
  * @tsid: target security identifier
  * @tclass: target security class
- * @qstr: object name
  * @out_sid: security identifier for new subject/object
  *
  * Compute a SID to use for labeling a new subject or object in the
@@ -1941,7 +1938,6 @@ int security_transition_sid_user(struct selinux_state *state,
 
 /**
  * security_member_sid - Compute the SID for member selection.
- * @state: SELinux state
  * @ssid: source security identifier
  * @tsid: target security identifier
  * @tclass: target security class
@@ -1966,7 +1962,6 @@ int security_member_sid(struct selinux_state *state,
 
 /**
  * security_change_sid - Compute the SID for object relabeling.
- * @state: SELinux state
  * @ssid: source security identifier
  * @tsid: target security identifier
  * @tclass: target security class
@@ -2008,22 +2003,17 @@ static inline int convert_context_handle_invalid_context(
 	return 0;
 }
 
-/**
- * services_convert_context - Convert a security context across policies.
- * @args: populated convert_context_args struct
- * @oldc: original context
- * @newc: converted context
- * @gfp_flags: allocation flags
- *
- * Convert the values in the security context structure @oldc from the values
- * specified in the policy @args->oldp to the values specified in the policy
- * @args->newp, storing the new context in @newc, and verifying that the
- * context is valid under the new policy.
+/*
+ * Convert the values in the security context
+ * structure `oldc' from the values specified
+ * in the policy `p->oldp' to the values specified
+ * in the policy `p->newp', storing the new context
+ * in `newc'.  Verify that the context is valid
+ * under the new policy.
  */
-int services_convert_context(struct convert_context_args *args,
-			     struct context *oldc, struct context *newc,
-			     gfp_t gfp_flags)
+static int convert_context(struct context *oldc, struct context *newc, void *p)
 {
+	struct convert_context_args *args;
 	struct ocontext *oc;
 	struct role_datum *role;
 	struct type_datum *typdatum;
@@ -2032,12 +2022,15 @@ int services_convert_context(struct convert_context_args *args,
 	u32 len;
 	int rc;
 
+	args = p;
+
 	if (oldc->str) {
-		s = kstrdup(oldc->str, gfp_flags);
+		s = kstrdup(oldc->str, GFP_KERNEL);
 		if (!s)
 			return -ENOMEM;
 
-		rc = string_to_context_struct(args->newp, NULL, s, newc, SECSID_NULL);
+		rc = string_to_context_struct(args->newp, NULL, s,
+					      newc, SECSID_NULL);
 		if (rc == -EINVAL) {
 			/*
 			 * Retain string representation for later mapping.
@@ -2067,13 +2060,16 @@ int services_convert_context(struct convert_context_args *args,
 	context_init(newc);
 
 	/* Convert the user. */
+	rc = -EINVAL;
 	usrdatum = symtab_search(&args->newp->p_users,
-				 sym_name(args->oldp, SYM_USERS, oldc->user - 1));
+				 sym_name(args->oldp,
+					  SYM_USERS, oldc->user - 1));
 	if (!usrdatum)
 		goto bad;
 	newc->user = usrdatum->value;
 
 	/* Convert the role. */
+	rc = -EINVAL;
 	role = symtab_search(&args->newp->p_roles,
 			     sym_name(args->oldp, SYM_ROLES, oldc->role - 1));
 	if (!role)
@@ -2081,8 +2077,10 @@ int services_convert_context(struct convert_context_args *args,
 	newc->role = role->value;
 
 	/* Convert the type. */
+	rc = -EINVAL;
 	typdatum = symtab_search(&args->newp->p_types,
-				 sym_name(args->oldp, SYM_TYPES, oldc->type - 1));
+				 sym_name(args->oldp,
+					  SYM_TYPES, oldc->type - 1));
 	if (!typdatum)
 		goto bad;
 	newc->type = typdatum->value;
@@ -2103,6 +2101,7 @@ int services_convert_context(struct convert_context_args *args,
 		oc = args->newp->ocontexts[OCON_ISID];
 		while (oc && oc->sid[0] != SECINITSID_UNLABELED)
 			oc = oc->next;
+		rc = -EINVAL;
 		if (!oc) {
 			pr_err("SELinux:  unable to look up"
 				" the initial SIDs list\n");
@@ -2116,7 +2115,8 @@ int services_convert_context(struct convert_context_args *args,
 	/* Check the validity of the new context. */
 	if (!policydb_context_isvalid(args->newp, newc)) {
 		rc = convert_context_handle_invalid_context(args->state,
-							    args->oldp, oldc);
+							args->oldp,
+							oldc);
 		if (rc)
 			goto bad;
 	}
@@ -2203,7 +2203,6 @@ static void selinux_notify_policy_change(struct selinux_state *state,
 	selinux_status_update_policyload(state, seqno);
 	selinux_netlbl_cache_invalidate();
 	selinux_xfrm_notify_policyload();
-	selinux_ima_measure_state_locked(state);
 }
 
 void selinux_policy_commit(struct selinux_state *state,
@@ -2264,10 +2263,8 @@ void selinux_policy_commit(struct selinux_state *state,
 
 /**
  * security_load_policy - Load a security policy configuration.
- * @state: SELinux state
  * @data: binary policy data
  * @len: length of data in bytes
- * @load_state: policy load state
  *
  * Load a new set of security policy configuration data,
  * validate it and convert the SID table as necessary.
@@ -2325,21 +2322,21 @@ int security_load_policy(struct selinux_state *state, void *data, size_t len,
 		goto err_free_isids;
 	}
 
-	/*
-	 * Convert the internal representations of contexts
-	 * in the new SID table.
-	 */
-
 	convert_data = kmalloc(sizeof(*convert_data), GFP_KERNEL);
 	if (!convert_data) {
 		rc = -ENOMEM;
 		goto err_free_isids;
 	}
 
+	/*
+	 * Convert the internal representations of contexts
+	 * in the new SID table.
+	 */
 	convert_data->args.state = state;
 	convert_data->args.oldp = &oldpolicy->policydb;
 	convert_data->args.newp = &newpolicy->policydb;
 
+	convert_data->sidtab_params.func = convert_context;
 	convert_data->sidtab_params.args = &convert_data->args;
 	convert_data->sidtab_params.target = newpolicy->sidtab;
 
@@ -2410,7 +2407,6 @@ static int ocontext_to_sid(struct sidtab *sidtab, struct ocontext *c,
 
 /**
  * security_port_sid - Obtain the SID for a port.
- * @state: SELinux state
  * @protocol: protocol number
  * @port: port number
  * @out_sid: security identifier
@@ -2463,8 +2459,7 @@ out:
 }
 
 /**
- * security_ib_pkey_sid - Obtain the SID for a pkey.
- * @state: SELinux state
+ * security_pkey_sid - Obtain the SID for a pkey.
  * @subnet_prefix: Subnet Prefix
  * @pkey_num: pkey number
  * @out_sid: security identifier
@@ -2518,9 +2513,8 @@ out:
 
 /**
  * security_ib_endport_sid - Obtain the SID for a subnet management interface.
- * @state: SELinux state
  * @dev_name: device name
- * @port_num: port number
+ * @port: port number
  * @out_sid: security identifier
  */
 int security_ib_endport_sid(struct selinux_state *state,
@@ -2573,7 +2567,6 @@ out:
 
 /**
  * security_netif_sid - Obtain the SID for a network interface.
- * @state: SELinux state
  * @name: interface name
  * @if_sid: interface SID
  */
@@ -2636,7 +2629,6 @@ static int match_ipv6_addrmask(u32 *input, u32 *addr, u32 *mask)
 
 /**
  * security_node_sid - Obtain the SID for a node (host).
- * @state: SELinux state
  * @domain: communication domain aka address family
  * @addrp: address
  * @addrlen: address length in bytes
@@ -2725,7 +2717,6 @@ out:
 
 /**
  * security_get_user_sids - Obtain reachable SIDs for a user.
- * @state: SELinux state
  * @fromsid: starting SID
  * @username: username
  * @sids: array of reachable SIDs for user
@@ -2851,10 +2842,9 @@ out_unlock:
 
 /**
  * __security_genfs_sid - Helper to obtain a SID for a file in a filesystem
- * @policy: policy
  * @fstype: filesystem type
  * @path: path from root of mount
- * @orig_sclass: file security class
+ * @sclass: file security class
  * @sid: SID for path
  *
  * Obtain a SID to use for a file in a filesystem that
@@ -2866,7 +2856,7 @@ out_unlock:
  */
 static inline int __security_genfs_sid(struct selinux_policy *policy,
 				       const char *fstype,
-				       const char *path,
+				       char *path,
 				       u16 orig_sclass,
 				       u32 *sid)
 {
@@ -2908,10 +2898,9 @@ static inline int __security_genfs_sid(struct selinux_policy *policy,
 
 /**
  * security_genfs_sid - Obtain a SID for a file in a filesystem
- * @state: SELinux state
  * @fstype: filesystem type
  * @path: path from root of mount
- * @orig_sclass: file security class
+ * @sclass: file security class
  * @sid: SID for path
  *
  * Acquire policy_rwlock before calling __security_genfs_sid() and release
@@ -2919,7 +2908,7 @@ static inline int __security_genfs_sid(struct selinux_policy *policy,
  */
 int security_genfs_sid(struct selinux_state *state,
 		       const char *fstype,
-		       const char *path,
+		       char *path,
 		       u16 orig_sclass,
 		       u32 *sid)
 {
@@ -2943,7 +2932,7 @@ int security_genfs_sid(struct selinux_state *state,
 
 int selinux_policy_genfs_sid(struct selinux_policy *policy,
 			const char *fstype,
-			const char *path,
+			char *path,
 			u16 orig_sclass,
 			u32 *sid)
 {
@@ -2953,7 +2942,6 @@ int selinux_policy_genfs_sid(struct selinux_policy *policy,
 
 /**
  * security_fs_use - Determine how to handle labeling for a filesystem.
- * @state: SELinux state
  * @sb: superblock in question
  */
 int security_fs_use(struct selinux_state *state, struct super_block *sb)
@@ -2963,7 +2951,7 @@ int security_fs_use(struct selinux_state *state, struct super_block *sb)
 	struct sidtab *sidtab;
 	int rc;
 	struct ocontext *c;
-	struct superblock_security_struct *sbsec = selinux_superblock(sb);
+	struct superblock_security_struct *sbsec = sb->s_security;
 	const char *fstype = sb->s_type->name;
 
 	if (!selinux_initialized(state)) {
@@ -2973,6 +2961,7 @@ int security_fs_use(struct selinux_state *state, struct super_block *sb)
 	}
 
 retry:
+	rc = 0;
 	rcu_read_lock();
 	policy = rcu_dereference(state->policy);
 	policydb = &policy->policydb;
@@ -3288,11 +3277,9 @@ out_unlock:
 
 /**
  * security_net_peersid_resolve - Compare and resolve two network peer SIDs
- * @state: SELinux state
  * @nlbl_sid: NetLabel SID
  * @nlbl_type: NetLabel labeling protocol type
  * @xfrm_sid: XFRM SID
- * @peer_sid: network peer sid
  *
  * Description:
  * Compare the @nlbl_sid and @xfrm_sid values and if the two SIDs can be
@@ -3514,7 +3501,6 @@ int security_get_allow_unknown(struct selinux_state *state)
 
 /**
  * security_policycap_supported - Check for a specific policy capability
- * @state: SELinux state
  * @req_cap: capability
  *
  * Description:
@@ -3796,11 +3782,15 @@ out:
 	return match;
 }
 
+static int (*aurule_callback)(void) = audit_update_lsm_rules;
+
 static int aurule_avc_callback(u32 event)
 {
-	if (event == AVC_CALLBACK_RESET)
-		return audit_update_lsm_rules();
-	return 0;
+	int err = 0;
+
+	if (event == AVC_CALLBACK_RESET && aurule_callback)
+		err = aurule_callback();
+	return err;
 }
 
 static int __init aurule_init(void)
@@ -3849,7 +3839,6 @@ static void security_netlbl_cache_add(struct netlbl_lsm_secattr *secattr,
 
 /**
  * security_netlbl_secattr_to_sid - Convert a NetLabel secattr to a SELinux SID
- * @state: SELinux state
  * @secattr: the NetLabel packet security attributes
  * @sid: the SELinux SID
  *
@@ -3932,7 +3921,6 @@ out:
 
 /**
  * security_netlbl_sid_to_secattr - Convert a SELinux SID to a NetLabel secattr
- * @state: SELinux state
  * @sid: the SELinux SID
  * @secattr: the NetLabel packet security attributes
  *
@@ -3978,32 +3966,7 @@ out:
 #endif /* CONFIG_NETLABEL */
 
 /**
- * __security_read_policy - read the policy.
- * @policy: SELinux policy
- * @data: binary policy data
- * @len: length of data in bytes
- *
- */
-static int __security_read_policy(struct selinux_policy *policy,
-				  void *data, size_t *len)
-{
-	int rc;
-	struct policy_file fp;
-
-	fp.data = data;
-	fp.len = *len;
-
-	rc = policydb_write(&policy->policydb, &fp);
-	if (rc)
-		return rc;
-
-	*len = (unsigned long)fp.data - (unsigned long)data;
-	return 0;
-}
-
-/**
  * security_read_policy - read the policy.
- * @state: selinux_state
  * @data: binary policy data
  * @len: length of data in bytes
  *
@@ -4012,6 +3975,8 @@ int security_read_policy(struct selinux_state *state,
 			 void **data, size_t *len)
 {
 	struct selinux_policy *policy;
+	int rc;
+	struct policy_file fp;
 
 	policy = rcu_dereference_protected(
 			state->policy, lockdep_is_held(&state->policy_mutex));
@@ -4023,42 +3988,14 @@ int security_read_policy(struct selinux_state *state,
 	if (!*data)
 		return -ENOMEM;
 
-	return __security_read_policy(policy, *data, len);
-}
+	fp.data = *data;
+	fp.len = *len;
 
-/**
- * security_read_state_kernel - read the policy.
- * @state: selinux_state
- * @data: binary policy data
- * @len: length of data in bytes
- *
- * Allocates kernel memory for reading SELinux policy.
- * This function is for internal use only and should not
- * be used for returning data to user space.
- *
- * This function must be called with policy_mutex held.
- */
-int security_read_state_kernel(struct selinux_state *state,
-			       void **data, size_t *len)
-{
-	int err;
-	struct selinux_policy *policy;
+	rc = policydb_write(&policy->policydb, &fp);
+	if (rc)
+		return rc;
 
-	policy = rcu_dereference_protected(
-			state->policy, lockdep_is_held(&state->policy_mutex));
-	if (!policy)
-		return -EINVAL;
+	*len = (unsigned long)fp.data - (unsigned long)*data;
+	return 0;
 
-	*len = policy->policydb.len;
-	*data = vmalloc(*len);
-	if (!*data)
-		return -ENOMEM;
-
-	err = __security_read_policy(policy, *data, len);
-	if (err) {
-		vfree(*data);
-		*data = NULL;
-		*len = 0;
-	}
-	return err;
 }

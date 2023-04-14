@@ -72,7 +72,6 @@ void nft_flow_rule_set_addr_type(struct nft_flow_rule *flow,
 
 struct nft_rule;
 struct nft_flow_rule *nft_flow_rule_create(struct net *net, const struct nft_rule *rule);
-int nft_flow_rule_stats(const struct nft_chain *chain, const struct nft_rule *rule);
 void nft_flow_rule_destroy(struct nft_flow_rule *flow);
 int nft_flow_rule_offload_commit(struct net *net);
 
@@ -92,7 +91,7 @@ int nft_flow_rule_offload_commit(struct net *net);
 	NFT_OFFLOAD_MATCH(__key, __base, __field, __len, __reg)		\
 	memset(&(__reg)->mask, 0xff, (__reg)->len);
 
-bool nft_chain_offload_support(const struct nft_base_chain *basechain);
+int nft_chain_offload_priority(struct nft_base_chain *basechain);
 
 int nft_offload_init(void);
 void nft_offload_exit(void);

@@ -37,6 +37,11 @@ extern int  data_start;
 extern void parisc_kernel_start(void);	/* Kernel entry point in head.S */
 
 #if CONFIG_PGTABLE_LEVELS == 3
+/* NOTE: This layout exactly conforms to the hybrid L2/L3 page table layout
+ * with the first pmd adjacent to the pgd and below it. gcc doesn't actually
+ * guarantee that global objects will be laid out in memory in the same order
+ * as the order of declaration, so put these in different sections and use
+ * the linker script to order them. */
 pmd_t pmd0[PTRS_PER_PMD] __section(".data..vm0.pmd") __attribute__ ((aligned(PAGE_SIZE)));
 #endif
 
@@ -127,12 +132,16 @@ static void __init setup_bootmem(void)
 		int j;
 
 		for (j = i; j > 0; j--) {
+			physmem_range_t tmp;
+
 			if (pmem_ranges[j-1].start_pfn <
 			    pmem_ranges[j].start_pfn) {
 
 				break;
 			}
-			swap(pmem_ranges[j-1], pmem_ranges[j]);
+			tmp = pmem_ranges[j-1];
+			pmem_ranges[j-1] = pmem_ranges[j];
+			pmem_ranges[j] = tmp;
 		}
 	}
 
@@ -374,8 +383,8 @@ static void __ref map_pages(unsigned long start_vaddr,
 
 #if CONFIG_PGTABLE_LEVELS == 3
 		if (pud_none(*pud)) {
-			pmd = memblock_alloc(PAGE_SIZE << PMD_TABLE_ORDER,
-					     PAGE_SIZE << PMD_TABLE_ORDER);
+			pmd = memblock_alloc(PAGE_SIZE << PMD_ORDER,
+					     PAGE_SIZE << PMD_ORDER);
 			if (!pmd)
 				panic("pmd allocation failed.\n");
 			pud_populate(NULL, pud, pmd);
@@ -549,17 +558,6 @@ void __init mem_init(void)
 	BUILD_BUG_ON(PGD_ENTRY_SIZE != sizeof(pgd_t));
 	BUILD_BUG_ON(PAGE_SHIFT + BITS_PER_PTE + BITS_PER_PMD + BITS_PER_PGD
 			> BITS_PER_LONG);
-#if CONFIG_PGTABLE_LEVELS == 3
-	BUILD_BUG_ON(PT_INITIAL > PTRS_PER_PMD);
-#else
-	BUILD_BUG_ON(PT_INITIAL > PTRS_PER_PGD);
-#endif
-
-#ifdef CONFIG_64BIT
-	/* avoid ldil_%L() asm statements to sign-extend into upper 32-bits */
-	BUILD_BUG_ON(__PAGE_OFFSET >= 0x80000000);
-	BUILD_BUG_ON(TMPALIAS_MAP_START >= 0x80000000);
-#endif
 
 	high_memory = __va((max_pfn << PAGE_SHIFT));
 	set_max_mapnr(max_low_pfn);
@@ -573,6 +571,8 @@ void __init mem_init(void)
 	} else
 #endif
 		parisc_vmalloc_start = SET_MAP_OFFSET(MAP_START);
+
+	mem_init_print_info(NULL);
 
 #if 0
 	/*
@@ -722,7 +722,7 @@ static unsigned long space_id[SID_ARRAY_SIZE] = { 1 }; /* disallow space 0 */
 static unsigned long dirty_space_id[SID_ARRAY_SIZE];
 static unsigned long space_id_index;
 static unsigned long free_space_ids = NR_SPACE_IDS - 1;
-static unsigned long dirty_space_ids;
+static unsigned long dirty_space_ids = 0;
 
 static DEFINE_SPINLOCK(sid_lock);
 
@@ -871,23 +871,3 @@ void flush_tlb_all(void)
 	spin_unlock(&sid_lock);
 }
 #endif
-
-static const pgprot_t protection_map[16] = {
-	[VM_NONE]					= PAGE_NONE,
-	[VM_READ]					= PAGE_READONLY,
-	[VM_WRITE]					= PAGE_NONE,
-	[VM_WRITE | VM_READ]				= PAGE_READONLY,
-	[VM_EXEC]					= PAGE_EXECREAD,
-	[VM_EXEC | VM_READ]				= PAGE_EXECREAD,
-	[VM_EXEC | VM_WRITE]				= PAGE_EXECREAD,
-	[VM_EXEC | VM_WRITE | VM_READ]			= PAGE_EXECREAD,
-	[VM_SHARED]					= PAGE_NONE,
-	[VM_SHARED | VM_READ]				= PAGE_READONLY,
-	[VM_SHARED | VM_WRITE]				= PAGE_WRITEONLY,
-	[VM_SHARED | VM_WRITE | VM_READ]		= PAGE_SHARED,
-	[VM_SHARED | VM_EXEC]				= PAGE_EXECREAD,
-	[VM_SHARED | VM_EXEC | VM_READ]			= PAGE_EXECREAD,
-	[VM_SHARED | VM_EXEC | VM_WRITE]		= PAGE_RWX,
-	[VM_SHARED | VM_EXEC | VM_WRITE | VM_READ]	= PAGE_RWX
-};
-DECLARE_VM_GET_PAGE_PROT

@@ -2,32 +2,36 @@
 /*
  * Copyright (C) 2018 HUAWEI, Inc.
  *             https://www.huawei.com/
+ * Created by Gao Xiang <gaoxiang25@huawei.com>
  */
 #include "internal.h"
 #include <linux/pagevec.h>
 
-struct page *erofs_allocpage(struct page **pagepool, gfp_t gfp)
+struct page *erofs_allocpage(struct list_head *pool, gfp_t gfp)
 {
-	struct page *page = *pagepool;
+	struct page *page;
 
-	if (page) {
+	if (!list_empty(pool)) {
+		page = lru_to_page(pool);
 		DBG_BUGON(page_ref_count(page) != 1);
-		*pagepool = (struct page *)page_private(page);
+		list_del(&page->lru);
 	} else {
 		page = alloc_page(gfp);
 	}
 	return page;
 }
 
-void erofs_release_pages(struct page **pagepool)
-{
-	while (*pagepool) {
-		struct page *page = *pagepool;
+#if (EROFS_PCPUBUF_NR_PAGES > 0)
+static struct {
+	u8 data[PAGE_SIZE * EROFS_PCPUBUF_NR_PAGES];
+} ____cacheline_aligned_in_smp erofs_pcpubuf[NR_CPUS];
 
-		*pagepool = (struct page *)page_private(page);
-		put_page(page);
-	}
+void *erofs_get_pcpubuf(unsigned int pagenr)
+{
+	preempt_disable();
+	return &erofs_pcpubuf[smp_processor_id()].data[pagenr * PAGE_SIZE];
 }
+#endif
 
 #ifdef CONFIG_EROFS_FS_ZIP
 /* global shrink count (for all mounted EROFS instances) */
@@ -282,7 +286,7 @@ static struct shrinker erofs_shrinker_info = {
 
 int __init erofs_init_shrinker(void)
 {
-	return register_shrinker(&erofs_shrinker_info, "erofs-shrinker");
+	return register_shrinker(&erofs_shrinker_info);
 }
 
 void erofs_exit_shrinker(void)
@@ -290,3 +294,4 @@ void erofs_exit_shrinker(void)
 	unregister_shrinker(&erofs_shrinker_info);
 }
 #endif	/* !CONFIG_EROFS_FS_ZIP */
+

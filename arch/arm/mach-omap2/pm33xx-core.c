@@ -16,6 +16,7 @@
 #include <linux/clk.h>
 #include <linux/cpu.h>
 #include <linux/platform_data/gpio-omap.h>
+#include <linux/pinctrl/pinmux.h>
 #include <linux/wkup_m3_ipc.h>
 #include <linux/of.h>
 #include <linux/rtc.h>

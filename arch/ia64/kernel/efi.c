@@ -34,13 +34,11 @@
 #include <linux/kexec.h>
 #include <linux/mm.h>
 
-#include <asm/efi.h>
 #include <asm/io.h>
 #include <asm/kregs.h>
 #include <asm/meminit.h>
 #include <asm/processor.h>
 #include <asm/mca.h>
-#include <asm/sal.h>
 #include <asm/setup.h>
 #include <asm/tlbflush.h>
 
@@ -525,7 +523,7 @@ efi_init (void)
 	 */
 	if (efi_systab == NULL)
 		panic("Whoa! Can't find EFI system table.\n");
-	if (efi_systab_check_header(&efi_systab->hdr))
+	if (efi_systab_check_header(&efi_systab->hdr, 1))
 		panic("Whoa! EFI system table signature incorrect\n");
 
 	efi_systab_report_header(&efi_systab->hdr, efi_systab->fw_vendor);

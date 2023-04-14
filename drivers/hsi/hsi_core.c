@@ -30,7 +30,7 @@ static struct attribute *hsi_bus_dev_attrs[] = {
 };
 ATTRIBUTE_GROUPS(hsi_bus_dev);
 
-static int hsi_bus_uevent(const struct device *dev, struct kobj_uevent_env *env)
+static int hsi_bus_uevent(struct device *dev, struct kobj_uevent_env *env)
 {
 	add_uevent_var(env, "MODALIAS=hsi:%s", dev_name(dev));
 
@@ -352,7 +352,7 @@ static void hsi_port_release(struct device *dev)
 }
 
 /**
- * hsi_port_unregister_clients - Unregister an HSI port
+ * hsi_unregister_port - Unregister an HSI port
  * @port: The HSI port to unregister
  */
 void hsi_port_unregister_clients(struct hsi_port *port)
